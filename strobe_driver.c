@@ -144,7 +144,7 @@ static ssize_t duration_show(struct device *dev, struct device_attribute *attr, 
 {
 	//struct strobe_device *sdev = container_of(dev, struct strobe_device, dev);
 	//return sprintf(buf, "duration %d usec\n", sdev->u_duration);
-	return sprintf(buf, "duration %d usec\n", device.u_duration);
+	return sprintf(buf, "duration %d nsec\n", device.n_duration);
 }
 
 static ssize_t duration_store(struct device *dev, struct device_attribute *attr,
@@ -157,7 +157,7 @@ static ssize_t duration_store(struct device *dev, struct device_attribute *attr,
 	if (err < 0)
 		return err;
 	//sdev->u_duration = var;
-	device.u_duration = var;
+	device.n_duration = var;
 	return count;
 }
 
@@ -193,7 +193,7 @@ static void strobe_function(struct work_struct *work)
 		udelay(sdev->u_offset);
 
 	gpio_set_value(sdev->strobe_out, 1);
-	udelay(sdev->u_duration);
+	ndelay(sdev->n_duration);
 	gpio_set_value(sdev->strobe_out, 0);
 	sdev->irq_handled++;
 }

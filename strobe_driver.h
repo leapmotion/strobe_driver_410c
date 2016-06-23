@@ -23,7 +23,7 @@ struct strobe_device {
 	struct device *dev;
 	struct class *cls;
 
-	unsigned int u_duration;
+	unsigned int n_duration;
 	unsigned int u_offset;
 };
 #endif
