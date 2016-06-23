@@ -18,7 +18,8 @@
 #include <linux/delay.h>
 #include <linux/gpio.h>
 
-#include <linux/kobject.h>
+#include <linux/device.h>
+#include <linux/kdev_t.h>
 #include <linux/sysfs.h>
 #include <linux/string.h>
 
@@ -27,8 +28,6 @@
 static int line_in = LINE_IN;
 
 static struct strobe_device device;
-static int major = 0;
-static int minor = 0;
 
 static int allocate_pins(void)
 {
@@ -58,14 +57,14 @@ static void release_pins(void)
 
 static irqreturn_t strobe_isr(int irq, void *dev_id)
 {
-        struct strobe_device *dev = dev_id;
+        struct strobe_device *sdev = dev_id;
         unsigned long irqflags;
 
-        dev->irq_received++;
+        sdev->irq_received++;
 
-        spin_lock_irqsave(&dev->strobe_lock, irqflags);
-        queue_work(dev->wq, &dev->work);
-        spin_unlock_irqrestore(&dev->strobe_lock, irqflags);
+        spin_lock_irqsave(&sdev->strobe_lock, irqflags);
+        queue_work(sdev->wq, &sdev->work);
+        spin_unlock_irqrestore(&sdev->strobe_lock, irqflags);
 
         return IRQ_HANDLED;
 }
@@ -95,9 +94,9 @@ static void release_irq(void)
 
 static int strobe_open(struct inode *inode, struct file *file)
 {
-	struct strobe_device *dev;
-	dev = container_of(inode->i_cdev, struct strobe_device, cdev);
-	file->private_data = dev;
+	struct strobe_device *sdev;
+	sdev = container_of(inode->i_cdev, struct strobe_device, cdev);
+	file->private_data = sdev;
 	return 0;
 }
 
@@ -124,62 +123,50 @@ struct file_operations strobe_funcs = {
 	write:		strobe_write,
 };
 
-static ssize_t duration_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+static ssize_t duration_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	//struct strobe_device *dev = container_of(kobj, struct strobe_device, kobj);
-	//return sprintf(buf, "duration %d usec\n", dev->u_duration);
+	//struct strobe_device *sdev = container_of(dev, struct strobe_device, dev);
+	//return sprintf(buf, "duration %d usec\n", sdev->u_duration);
 	return sprintf(buf, "duration %d usec\n", device.u_duration);
 }
 
-static ssize_t duration_store(struct kobject *kobj, struct kobj_attribute *attr,
-		const char *buf, size_t count)
+static ssize_t duration_store(struct device *dev, struct device_attribute *attr,
+			const char *buf, size_t count)
 {
 	int var, err;
-	//struct strobe_device *dev = container_of(kobj, struct strobe_device, kobj);
+	//struct strobe_device *sdev = container_of(dev, struct strobe_device, dev);
 
 	err = kstrtoint(buf, 10, &var);
 	if (err < 0)
 		return err;
+	//sdev->u_duration = var;
 	device.u_duration = var;
-	//dev->u_duration = var;
 	return count;
 }
 
-static ssize_t offset_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+static ssize_t offset_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	//struct strobe_device *dev = container_of(kobj, struct strobe_device, kobj);
-	//return sprintf(buf, "offset %d usec\n", dev->u_offset);
+	//struct strobe_device *sdev = container_of(dev, struct strobe_device, dev);
+	//return sprintf(buf, "offset %d usec\n", sdev->u_offset);
 	return sprintf(buf, "offset %d usec\n", device.u_offset);
 }
 
-static ssize_t offset_store(struct kobject *kobj, struct kobj_attribute *attr,
-		const char *buf, size_t count)
+static ssize_t offset_store(struct device *dev,	struct device_attribute *attr,
+			const char *buf, size_t count)
 {
 	int var, err;
-	//struct strobe_device *dev = container_of(kobj, struct strobe_device, kobj);
+	//struct strobe_device *sdev = container_of(dev, struct strobe_device, dev);
 
 	err = kstrtoint(buf, 10, &var);
 	if (err < 0)
 		return err;
-	//dev->u_offset = var;
+	//sdev->u_offset = var;
 	device.u_offset = var;
 	return count;
 }
 
-static struct kobj_attribute dev_attr_duration =
-	__ATTR(duration, 0664, duration_show, duration_store);
-static struct kobj_attribute dev_attr_offset =
-	__ATTR(offset, 0664, offset_show, offset_store);
-
-static struct attribute *strobe_attrs[] = {
-	&dev_attr_duration.attr,
-	&dev_attr_offset.attr,
-	NULL
-};
-
-static struct attribute_group strobe_attr_group = {
-	.attrs = strobe_attrs,
-};
+static DEVICE_ATTR(duration, 0664, duration_show, duration_store);
+static DEVICE_ATTR(offset, 0664, offset_show, offset_store);
 
 static void strobe_function(struct work_struct *work)
 {
@@ -190,16 +177,13 @@ static void strobe_function(struct work_struct *work)
 
 static int __init strobe_init_module(void)
 {
-	dev_t dev = 0;
-	int err, devno;
+	int err;
 
-	err = alloc_chrdev_region(&dev, minor, 1, MODNAME);
-	major = MAJOR(dev);
+	err = alloc_chrdev_region(&device.devno, 1, 1, MODNAME);
 	if (err < 0) {
-		printk("Can't get major %d\n", major);
+		printk("Can't get major\n");
 		return err;
 	}
-	devno = MKDEV(major, 0);
 	memset(&device, 0, sizeof(struct strobe_device));
 
 	if (allocate_pins()) {
@@ -223,45 +207,66 @@ static int __init strobe_init_module(void)
 	INIT_WORK(&device.work, strobe_function);
 	device.wq = create_singlethread_workqueue("WQ");
 
-	err = cdev_add(&device.cdev, devno, 1);
+	err = cdev_add(&device.cdev, device.devno, 1);
 	if (err) {
 		printk("Error %d adding device\n", err);
 		goto fail_cdev;
 	}
 
-	device.kobj = kobject_create_and_add("strobe", kernel_kobj);
-	if (!device.kobj) {
-		printk("create kobject failure\n");
-		goto fail_cdev;
+	device.cls = class_create(THIS_MODULE, CLASS_NAME);
+	if (IS_ERR(device.cls)) {
+		printk("cant create class %s\n", CLASS_NAME);
+		goto fail_class;
 	}
-	err = sysfs_create_group(device.kobj, &strobe_attr_group);
-	if (err) {
-		printk("create sysfs group failure\n");
-		goto fail_sysfs;
+
+	device.dev = device_create(device.cls, NULL, device.devno, NULL, DEVICE_NAME);
+	if (IS_ERR(device.dev)) {
+		printk("cant create device %s\n", DEVICE_NAME);
+		goto fail_device;
 	}
+
+	err = device_create_file(device.dev, &dev_attr_duration);
+	if (err < 0) {
+		printk("cant create device attribute %s %s\n",
+		DEVICE_NAME, dev_attr_duration.attr.name);
+		goto fail_dev;
+	}
+
+	err = device_create_file(device.dev, &dev_attr_offset);
+	if (err < 0) {
+		printk("cant create device attribute %s %s\n",
+		DEVICE_NAME, dev_attr_offset.attr.name);
+		goto fail_dev;
+	}
+
 	return 0;
 
-fail_sysfs:
-	kobject_put(device.kobj);
+fail_dev:
+	device_destroy(device.cls, device.devno);
+fail_device:
+	class_unregister(device.cls);
+	class_destroy(device.cls);
+fail_class:
+	cdev_del(&device.cdev);
 fail_cdev:
 	release_irq();
 fail_irq:
 	release_pins();
 fail_pins:
-	unregister_chrdev_region(devno, 1);
+	unregister_chrdev_region(device.devno, 1);
+	destroy_workqueue(device.wq);
 	return err;
 }
 
 static void __exit strobe_cleanup_module(void)
 {
-	int devno;
-	sysfs_remove_group(device.kobj, &strobe_attr_group);
-	kobject_put(device.kobj);
+	device_destroy(device.cls, device.devno);
+	class_unregister(device.cls);
+	class_destroy(device.cls);
+	cdev_del(&device.cdev);
 	release_irq();
 	release_pins();
-	cdev_del(&device.cdev);
-	devno = MKDEV(major, minor);
-	unregister_chrdev_region(devno, 1);
+	unregister_chrdev_region(device.devno, 1);
 	destroy_workqueue(device.wq);
 }
 
