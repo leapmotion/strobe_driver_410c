@@ -25,34 +25,36 @@
 
 #include "strobe_driver.h"
 
-static int line_in = LINE_IN;
+//Board specific gpio in. Temporary values for dragonboard410c
+#define STROBE_INT_IN 13
+#define STROBE_OUT 12
 
 static struct strobe_device device;
 
-static int allocate_pins(void)
+static int allocate_pin(unsigned int pin, int output)
 {
 	int ret;
-	if (!gpio_is_valid(line_in)) {
-		printk("%d line is not valid.\n", line_in);
+	if (!gpio_is_valid(pin)) {
+		printk("%d pin is not valid.\n", pin);
 		return -1;
 	}
-	ret = gpio_request(line_in, "v");
+	ret = gpio_request(pin, "v");
 	if (ret) {
-		printk("%d line gpio_request failure\n", line_in);
+		printk("%d pin gpio_request failure\n", pin);
 		return -1;
 	}
-	ret = gpio_direction_input(line_in);
+
+	if (output)
+		ret = gpio_direction_output(pin, 0);
+	else
+		ret = gpio_direction_input(pin);
+
 	if (ret) {
-		gpio_free(line_in);
-		printk("%d line gpio_direction_input failure\n", line_in);
+		gpio_free(pin);
+		printk("faile to set gpio_direction with %d pin\n", pin);
 		return -1;
 	}
 	return 0;
-}
-
-static void release_pins(void)
-{
-	gpio_free(line_in);
 }
 
 static irqreturn_t strobe_isr(int irq, void *dev_id)
@@ -69,11 +71,11 @@ static irqreturn_t strobe_isr(int irq, void *dev_id)
         return IRQ_HANDLED;
 }
 
-static int allocate_irq(void)
+static int allocate_irq(unsigned int pin)
 {
 	int irq, error;
 
-	irq = gpio_to_irq(line_in);
+	irq = gpio_to_irq(pin);
 	if (irq < 0) {
 		printk("Unable to get irq: error %d\n", irq);
 		return -1;
@@ -87,9 +89,24 @@ static int allocate_irq(void)
 	return 0;
 }
 
-static void release_irq(void)
+static int allocate_pins(void)
+{
+	int ret;
+	ret = allocate_pin(device.strobe_out, 1);
+	if (ret)
+		return ret;
+	ret = allocate_pin(device.strobe_in, 0);
+	if (ret)
+		return ret;
+	ret = allocate_irq(device.strobe_in);
+	return ret;
+}
+
+static void release_pins(void)
 {
 	free_irq(device.irq, &device);
+	gpio_free(device.strobe_in);
+	gpio_free(device.strobe_out);
 }
 
 static int strobe_open(struct inode *inode, struct file *file)
@@ -170,9 +187,15 @@ static DEVICE_ATTR(offset, 0664, offset_show, offset_store);
 
 static void strobe_function(struct work_struct *work)
 {
-	struct strobe_device *dev = container_of(work, struct strobe_device, work);
-	printk("stobe interrupt: %lu\n", dev->irq_received);
-	dev->irq_handled++;
+	struct strobe_device *sdev = container_of(work, struct strobe_device, work);
+	printk("stobe interrupt: %lu\n", sdev->irq_received);
+	if (sdev->u_offset)
+		udelay(sdev->u_offset);
+
+	gpio_set_value(sdev->strobe_out, 1);
+	udelay(sdev->u_duration);
+	gpio_set_value(sdev->strobe_out, 0);
+	sdev->irq_handled++;
 }
 
 static int __init strobe_init_module(void)
@@ -186,19 +209,6 @@ static int __init strobe_init_module(void)
 	}
 	memset(&device, 0, sizeof(struct strobe_device));
 
-	if (allocate_pins()) {
-		printk("Failed to allocate pins\n");
-		err = -ENOSR;
-		goto fail_pins;
-	}
-
-	if (allocate_irq()) {
-		printk("Faile to allocate irqs\n");
-		err = -ENOSR;
-		goto fail_irq;
-
-	}
-
 	sema_init(&device.sem, 1);
 	cdev_init(&device.cdev, &strobe_funcs);
 	device.cdev.owner = THIS_MODULE;
@@ -206,6 +216,16 @@ static int __init strobe_init_module(void)
 	spin_lock_init(&device.strobe_lock);
 	INIT_WORK(&device.work, strobe_function);
 	device.wq = create_singlethread_workqueue("WQ");
+
+	//The following gpio pins are board specific data
+	device.strobe_in = STROBE_INT_IN;
+	device.strobe_out = STROBE_OUT;
+
+	if (allocate_pins()) {
+		printk("Failed to allocate pins\n");
+		err = -ENOSR;
+		goto fail_cdev;
+	}
 
 	err = cdev_add(&device.cdev, device.devno, 1);
 	if (err) {
@@ -249,10 +269,7 @@ fail_device:
 fail_class:
 	cdev_del(&device.cdev);
 fail_cdev:
-	release_irq();
-fail_irq:
 	release_pins();
-fail_pins:
 	unregister_chrdev_region(device.devno, 1);
 	destroy_workqueue(device.wq);
 	return err;
@@ -264,7 +281,6 @@ static void __exit strobe_cleanup_module(void)
 	class_unregister(device.cls);
 	class_destroy(device.cls);
 	cdev_del(&device.cdev);
-	release_irq();
 	release_pins();
 	unregister_chrdev_region(device.devno, 1);
 	destroy_workqueue(device.wq);
