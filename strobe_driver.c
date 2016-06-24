@@ -61,14 +61,41 @@ static irqreturn_t strobe_isr(int irq, void *dev_id)
 {
         struct strobe_device *sdev = dev_id;
         unsigned long irqflags;
+	unsigned int duration = sdev->u_duration;
 
+	if (!duration)
+		return IRQ_HANDLED;
+	gpio_set_value(sdev->strobe_out, 1);
+
+	//100 usec is initial delay for threaded isr.
+	if (duration > 100)
+		return IRQ_WAKE_THREAD;
+	//5 usec is initial dealy of isr operation.
+	if (duration < 5) {
+		gpio_set_value(sdev->strobe_out, 0);
+		return IRQ_HANDLED;
+	}
+	duration -= 5;
+	udelay(duration);
+	gpio_set_value(sdev->strobe_out, 0);
+	/*
         sdev->irq_received++;
-
         spin_lock_irqsave(&sdev->strobe_lock, irqflags);
         queue_work(sdev->wq, &sdev->work);
-        spin_unlock_irqrestore(&sdev->strobe_lock, irqflags);
-
+        spin_unlock_irqrestore(&sdev->strobe_lock, irqflags);*/
         return IRQ_HANDLED;
+}
+
+static irqreturn_t strobe_isr2(int irq, void *dev_id)
+{
+        struct strobe_device *sdev = dev_id;
+	unsigned int duration = sdev->u_duration - 100;
+
+	udelay(duration);
+	//usleep_range(duration, duration);
+	gpio_set_value(sdev->strobe_out, 0);
+
+	return IRQ_HANDLED;
 }
 
 static int allocate_irq(unsigned int pin)
@@ -80,7 +107,8 @@ static int allocate_irq(unsigned int pin)
 		printk("Unable to get irq: error %d\n", irq);
 		return -1;
 	}
-	error = request_irq(irq, strobe_isr, IRQF_SHARED | IRQF_TRIGGER_RISING, MODNAME, (void *)&device);
+	//error = request_irq(irq, strobe_isr, IRQF_TRIGGER_RISING, MODNAME, (void *)&device);
+	error = request_threaded_irq(irq, strobe_isr, strobe_isr2, IRQF_ONESHOT | IRQF_TRIGGER_RISING, MODNAME, (void *)&device);
 	if (error) {
 		printk("request_irq %d failure. error %d\n", irq, error);
 		return -1;
@@ -144,7 +172,7 @@ static ssize_t duration_show(struct device *dev, struct device_attribute *attr, 
 {
 	//struct strobe_device *sdev = container_of(dev, struct strobe_device, dev);
 	//return sprintf(buf, "duration %d usec\n", sdev->u_duration);
-	return sprintf(buf, "duration %d nsec\n", device.n_duration);
+	return sprintf(buf, "duration %d nsec\n", device.u_duration);
 }
 
 static ssize_t duration_store(struct device *dev, struct device_attribute *attr,
@@ -157,7 +185,7 @@ static ssize_t duration_store(struct device *dev, struct device_attribute *attr,
 	if (err < 0)
 		return err;
 	//sdev->u_duration = var;
-	device.n_duration = var;
+	device.u_duration = var;
 	return count;
 }
 
@@ -188,14 +216,14 @@ static DEVICE_ATTR(offset, 0664, offset_show, offset_store);
 static void strobe_function(struct work_struct *work)
 {
 	struct strobe_device *sdev = container_of(work, struct strobe_device, work);
-	printk("stobe interrupt: %lu\n", sdev->irq_received);
 	if (sdev->u_offset)
 		udelay(sdev->u_offset);
 
 	gpio_set_value(sdev->strobe_out, 1);
-	ndelay(sdev->n_duration);
+	ndelay(sdev->u_duration);
 	gpio_set_value(sdev->strobe_out, 0);
 	sdev->irq_handled++;
+	printk("stobe interrupt: %lu\n", sdev->irq_received);
 }
 
 static int __init strobe_init_module(void)
